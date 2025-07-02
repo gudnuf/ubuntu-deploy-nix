@@ -46,22 +46,22 @@ let
         resolver 8.8.8.8 8.8.4.4 valid=300s;
         resolver_timeout 5s;
 
-        # Handle CORS preflight requests
-        if ($request_method = 'OPTIONS') {
-            add_header 'Access-Control-Allow-Origin' '*' always;
-            add_header 'Access-Control-Allow-Methods' 'GET, POST, OPTIONS, PUT, DELETE' always;
-            add_header 'Access-Control-Allow-Headers' '*' always;
-            add_header 'Access-Control-Max-Age' 1728000 always;
-            add_header 'Content-Type' 'text/plain; charset=utf-8' always;
-            add_header 'Content-Length' 0 always;
-            return 204;
-        }
-
-        # Add CORS headers to all responses
-        add_header 'Access-Control-Allow-Origin' '*' always;
-
-        # Proxy all other requests
+        # Proxy all requests with CORS support
         location / {
+            # Handle CORS preflight requests
+            if ($request_method = 'OPTIONS') {
+                add_header 'Access-Control-Allow-Origin' '*' always;
+                add_header 'Access-Control-Allow-Methods' 'GET, POST, OPTIONS, PUT, DELETE' always;
+                add_header 'Access-Control-Allow-Headers' '*' always;
+                add_header 'Access-Control-Max-Age' 1728000 always;
+                add_header 'Content-Type' 'text/plain; charset=utf-8' always;
+                add_header 'Content-Length' 0 always;
+                return 204;
+            }
+
+            # Add CORS headers to all responses
+            add_header 'Access-Control-Allow-Origin' '*' always;
+
             proxy_pass http://${service.proxy.host}:${toString service.proxy.port};
             proxy_set_header Host $host;
             proxy_set_header X-Real-IP $remote_addr;
@@ -84,12 +84,14 @@ let
         # Health check endpoint
         location /nginx-health {
             access_log off;
+            add_header 'Access-Control-Allow-Origin' '*' always;
             return 200 "nginx healthy for ${service.domain}\n";
             add_header Content-Type text/plain;
         }
         
         # Security.txt
         location /.well-known/security.txt {
+            add_header 'Access-Control-Allow-Origin' '*' always;
             return 200 "Contact: mailto:${service.email}\nExpires: 2025-12-31T23:59:59.000Z\n";
             add_header Content-Type text/plain;
         }
