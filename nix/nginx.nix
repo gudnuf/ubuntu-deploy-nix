@@ -46,7 +46,21 @@ let
         resolver 8.8.8.8 8.8.4.4 valid=300s;
         resolver_timeout 5s;
 
-        # Proxy all requests
+        # Handle CORS preflight requests
+        if ($request_method = 'OPTIONS') {
+            add_header 'Access-Control-Allow-Origin' '*' always;
+            add_header 'Access-Control-Allow-Methods' 'GET, POST, OPTIONS, PUT, DELETE' always;
+            add_header 'Access-Control-Allow-Headers' '*' always;
+            add_header 'Access-Control-Max-Age' 1728000 always;
+            add_header 'Content-Type' 'text/plain; charset=utf-8' always;
+            add_header 'Content-Length' 0 always;
+            return 204;
+        }
+
+        # Add CORS headers to all responses
+        add_header 'Access-Control-Allow-Origin' '*' always;
+
+        # Proxy all other requests
         location / {
             proxy_pass http://${service.proxy.host}:${toString service.proxy.port};
             proxy_set_header Host $host;
