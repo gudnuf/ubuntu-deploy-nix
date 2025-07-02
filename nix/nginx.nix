@@ -46,10 +46,13 @@ let
         resolver 8.8.8.8 8.8.4.4 valid=300s;
         resolver_timeout 5s;
 
-        # Proxy all requests with CORS support
+        # Proxy all requests with CORS support for auth25.agi.cash
         location / {
-            # Handle CORS preflight requests
-            if ($request_method = 'OPTIONS') {
+            # Handle CORS preflight requests for auth25.agi.cash only
+            if ($server_name = 'auth25.agi.cash') {
+                set $cors_method $request_method;
+            }
+            if ($cors_method = 'OPTIONS') {
                 add_header 'Access-Control-Allow-Origin' '*' always;
                 add_header 'Access-Control-Allow-Methods' 'GET, POST, OPTIONS, PUT, DELETE' always;
                 add_header 'Access-Control-Allow-Headers' '*' always;
@@ -59,8 +62,10 @@ let
                 return 204;
             }
 
-            # Add CORS headers to all responses
-            add_header 'Access-Control-Allow-Origin' '*' always;
+            # Add CORS headers to responses for auth25.agi.cash only
+            if ($server_name = 'auth25.agi.cash') {
+                add_header 'Access-Control-Allow-Origin' '*' always;
+            }
 
             proxy_pass http://${service.proxy.host}:${toString service.proxy.port};
             proxy_set_header Host $host;
@@ -84,14 +89,18 @@ let
         # Health check endpoint
         location /nginx-health {
             access_log off;
-            add_header 'Access-Control-Allow-Origin' '*' always;
+            if ($server_name = 'auth25.agi.cash') {
+                add_header 'Access-Control-Allow-Origin' '*' always;
+            }
             return 200 "nginx healthy for ${service.domain}\n";
             add_header Content-Type text/plain;
         }
         
         # Security.txt
         location /.well-known/security.txt {
-            add_header 'Access-Control-Allow-Origin' '*' always;
+            if ($server_name = 'auth25.agi.cash') {
+                add_header 'Access-Control-Allow-Origin' '*' always;
+            }
             return 200 "Contact: mailto:${service.email}\nExpires: 2025-12-31T23:59:59.000Z\n";
             add_header Content-Type text/plain;
         }
