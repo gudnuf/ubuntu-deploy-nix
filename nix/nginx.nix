@@ -2,6 +2,91 @@
 # This file generates the nginx.conf file based on the provided configuration.
 { pkgs, config }:
 
+let
+  # Helper function to generate server names for all domains
+  allDomains = builtins.concatStringsSep " " (map (service: service.domain) config.services);
+  
+  # Helper function to generate HTTP server block for redirects
+  httpRedirectBlock = ''
+    # HTTP to HTTPS redirect
+    server {
+        listen 80 default_server;
+        listen [::]:80 default_server;
+        server_name ${allDomains};
+        
+        # Allow Let's Encrypt challenges
+        location ^~ /.well-known/acme-challenge/ {
+            root /var/www/html;
+            allow all;
+        }
+        
+        # Redirect everything else to HTTPS
+        location / {
+            return 301 https://$server_name$request_uri;
+        }
+    }
+  '';
+  
+  # Helper function to generate HTTPS server block for a service
+  httpsServerBlock = service: ''
+    # HTTPS server for ${service.domain}
+    server {
+        listen 443 ssl http2;
+        listen [::]:443 ssl http2;
+        server_name ${service.domain};
+        
+        # SSL certificates
+        ssl_certificate /etc/letsencrypt/live/${service.domain}/fullchain.pem;
+        ssl_certificate_key /etc/letsencrypt/live/${service.domain}/privkey.pem;
+        ssl_trusted_certificate /etc/letsencrypt/live/${service.domain}/chain.pem;
+        
+        # Enable OCSP stapling
+        ssl_stapling on;
+        ssl_stapling_verify on;
+        resolver 8.8.8.8 8.8.4.4 valid=300s;
+        resolver_timeout 5s;
+
+        # Proxy all requests
+        location / {
+            proxy_pass http://${service.proxy.host}:${toString service.proxy.port};
+            proxy_set_header Host $host;
+            proxy_set_header X-Real-IP $remote_addr;
+            proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+            proxy_set_header X-Forwarded-Proto $scheme;
+            proxy_set_header X-Forwarded-Host $host;
+            proxy_set_header X-Forwarded-Port $server_port;
+            
+            # WebSocket support
+            proxy_http_version 1.1;
+            proxy_set_header Upgrade $http_upgrade;
+            proxy_set_header Connection "upgrade";
+            
+            # Timeouts
+            proxy_connect_timeout 30s;
+            proxy_send_timeout 30s;
+            proxy_read_timeout 30s;
+        }
+
+        # Health check endpoint
+        location /nginx-health {
+            access_log off;
+            return 200 "nginx healthy for ${service.domain}\n";
+            add_header Content-Type text/plain;
+        }
+        
+        # Security.txt
+        location /.well-known/security.txt {
+            return 200 "Contact: mailto:${service.email}\nExpires: 2025-12-31T23:59:59.000Z\n";
+            add_header Content-Type text/plain;
+        }
+    }
+  '';
+  
+  # Generate all HTTPS server blocks
+  allHttpsServerBlocks = builtins.concatStringsSep "\n\n" (map httpsServerBlock config.services);
+
+in
+
 pkgs.writeText "nginx.conf" ''
   user ${config.nginxUser} ${config.nginxGroup};
   worker_processes auto;
@@ -42,74 +127,8 @@ pkgs.writeText "nginx.conf" ''
       add_header X-XSS-Protection "1; mode=block";
       add_header Strict-Transport-Security "max-age=31536000; includeSubDomains" always;
 
-      # HTTP to HTTPS redirect
-      server {
-          listen 80 default_server;
-          listen [::]:80 default_server;
-          server_name ${config.domain};
-          
-          # Allow Let's Encrypt challenges
-          location ^~ /.well-known/acme-challenge/ {
-              root /var/www/html;
-              allow all;
-          }
-          
-          # Redirect everything else to HTTPS
-          location / {
-              return 301 https://$server_name$request_uri;
-          }
-      }
+      ${httpRedirectBlock}
 
-      # HTTPS server
-      server {
-          listen 443 ssl http2 default_server;
-          listen [::]:443 ssl http2 default_server;
-          server_name ${config.domain};
-          
-          # SSL certificates
-          ssl_certificate /etc/letsencrypt/live/${config.domain}/fullchain.pem;
-          ssl_certificate_key /etc/letsencrypt/live/${config.domain}/privkey.pem;
-          ssl_trusted_certificate /etc/letsencrypt/live/${config.domain}/chain.pem;
-          
-          # Enable OCSP stapling
-          ssl_stapling on;
-          ssl_stapling_verify on;
-          resolver 8.8.8.8 8.8.4.4 valid=300s;
-          resolver_timeout 5s;
-
-          # Proxy all requests
-          location / {
-              proxy_pass http://${config.proxy.host}:${toString config.proxy.port};
-              proxy_set_header Host $host;
-              proxy_set_header X-Real-IP $remote_addr;
-              proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
-              proxy_set_header X-Forwarded-Proto $scheme;
-              proxy_set_header X-Forwarded-Host $host;
-              proxy_set_header X-Forwarded-Port $server_port;
-              
-              # WebSocket support
-              proxy_http_version 1.1;
-              proxy_set_header Upgrade $http_upgrade;
-              proxy_set_header Connection "upgrade";
-              
-              # Timeouts
-              proxy_connect_timeout 30s;
-              proxy_send_timeout 30s;
-              proxy_read_timeout 30s;
-          }
-
-          # Health check endpoint
-          location /nginx-health {
-              access_log off;
-              return 200 "nginx healthy\n";
-              add_header Content-Type text/plain;
-          }
-          
-          # Security.txt
-          location /.well-known/security.txt {
-              return 200 "Contact: mailto:${config.email}\nExpires: 2025-12-31T23:59:59.000Z\n";
-              add_header Content-Type text/plain;
-          }
-      }
+      ${allHttpsServerBlocks}
   }
 '' 

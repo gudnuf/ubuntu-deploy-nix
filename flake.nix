@@ -18,6 +18,14 @@
         # Generate nginx config from the modular files
         nginx-config = nginx-generator { pkgs = pkgs; config = config; };
 
+        # Helper functions for multi-service support
+        allDomains = map (service: service.domain) config.services;
+        allDomainsStr = builtins.concatStringsSep ", " allDomains;
+        
+        # Generate service info for display
+        serviceInfo = service: "  - ${service.domain} -> ${service.proxy.host}:${toString service.proxy.port}";
+        allServicesInfo = builtins.concatStringsSep "\n" (map serviceInfo config.services);
+
         # Temporary nginx config for the ACME challenge
         acme-nginx-config = pkgs.writeText "nginx-acme.conf" ''
           user root;
@@ -41,18 +49,30 @@
           }
         '';
 
-        # Basic index.html
+        # Enhanced index.html showing all services
         indexHtml = pkgs.writeText "index.html" ''
           <!DOCTYPE html>
           <html>
           <head>
               <title>🔒 Nginx Reverse Proxy</title>
               <meta charset="utf-8">
+              <style>
+                body { font-family: Arial, sans-serif; margin: 40px; }
+                .service { margin: 20px 0; padding: 15px; border-left: 4px solid #007acc; background: #f5f5f5; }
+                .domain { font-weight: bold; color: #007acc; }
+                .proxy { color: #666; }
+              </style>
           </head>
           <body>
               <h1>🚀 Nginx Reverse Proxy Active</h1>
-              <p>Proxying to: ${config.proxy.host}:${toString config.proxy.port}</p>
-              <p>Domain: ${config.domain}</p>
+              <p>Currently proxying ${toString (builtins.length config.services)} service(s):</p>
+              ${builtins.concatStringsSep "\n" (map (service: ''
+                <div class="service">
+                  <div class="domain">${service.domain}</div>
+                  <div class="proxy">Proxying to: ${service.proxy.host}:${toString service.proxy.port}</div>
+                  <div class="proxy">Contact: ${service.email}</div>
+                </div>
+              '') config.services)}
           </body>
           </html>
         '';
@@ -68,9 +88,10 @@
             dig
           ];
           shellHook = ''
-            echo "Nginx reverse proxy dev environment"
-            echo "Domain: ${config.domain}"
-            echo "Proxy: ${config.proxy.host}:${toString config.proxy.port}"
+            echo "🚀 Nginx reverse proxy dev environment"
+            echo "📋 Configured services:"
+            ${builtins.concatStringsSep "\n" (map (service: ''echo "  - ${service.domain} -> ${service.proxy.host}:${toString service.proxy.port}"'') config.services)}
+            echo ""
             echo "Available commands: nix run .#<command>"
             echo "Commands: setup, get-cert, start, stop, status, logs, etc."
           '';
@@ -83,7 +104,8 @@
           # Script to regenerate and install the nginx config
           regenerate-config = pkgs.writeShellScriptBin "regenerate-config" ''
             set -e
-            echo "🔄 Regenerating nginx configuration for ${config.domain}"
+            echo "🔄 Regenerating nginx configuration for ${toString (builtins.length config.services)} service(s)"
+            echo "📋 Domains: ${allDomainsStr}"
 
             echo "🧪 Testing new configuration from Nix store..."
             if ! sudo ${pkgs.nginx}/bin/nginx -t -c ${nginx-config}; then
@@ -101,7 +123,8 @@
           # Initial setup script
           setup = pkgs.writeShellScriptBin "setup-nginx" ''
             set -e
-            echo "🔧 Setting up nginx for domain: ${config.domain}"
+            echo "🔧 Setting up nginx for ${toString (builtins.length config.services)} service(s)"
+            echo "📋 Domains: ${allDomainsStr}"
             
             # Create nginx user and group if they don't exist
             if ! getent group ${config.nginxGroup} >/dev/null; then
@@ -130,15 +153,17 @@
             
             echo "✅ Basic setup complete."
             echo "📋 Next steps:"
-            echo "   1. Point your domain's A record to this server's IP."
+            echo "   1. Point your domains' A records to this server's IP:"
+            ${builtins.concatStringsSep "\n" (map (service: ''echo "      - ${service.domain}"'') config.services)}
             echo "   2. Run 'nix run .#get-cert' to obtain SSL certificates."
             echo "   3. Run 'nix run .#start' to start the reverse proxy."
           '';
 
-          # Get SSL certificate
+          # Get SSL certificates for all domains
           get-cert = pkgs.writeShellScriptBin "get-ssl-cert" ''
             set -e
-            echo "🔒 Obtaining SSL certificate for ${config.domain}"
+            echo "🔒 Obtaining SSL certificates for ${toString (builtins.length config.services)} domain(s)"
+            echo "📋 Domains: ${allDomainsStr}"
             
             echo "🚀 Starting nginx for ACME challenge..."
             sudo cp ${acme-nginx-config} /etc/nginx/nginx.conf
@@ -148,33 +173,40 @@
             sleep 3
             
             echo "🔍 Checking domain resolution..."
-            DOMAIN_IP=$(${pkgs.dig}/bin/dig +short ${config.domain})
             SERVER_IP=$(${pkgs.curl}/bin/curl -s http://ipv4.icanhazip.com/ || echo "unknown")
-            
-            echo "📍 Domain ${config.domain} resolves to: $DOMAIN_IP"
             echo "📍 This server's IP: $SERVER_IP"
             
-            if [ "$DOMAIN_IP" != "$SERVER_IP" ] && [ "$SERVER_IP" != "unknown" ]; then
-              echo "⚠️  Warning: Domain may not point to this server"
-              read -p "Continue anyway? (y/N): " -n 1 -r
-              echo
-              if [[ ! $REPLY =~ ^[Yy]$ ]]; then
-                exit 1
+            # Check each domain
+            ${builtins.concatStringsSep "\n" (map (service: ''
+              DOMAIN_IP=$(${pkgs.dig}/bin/dig +short ${service.domain})
+              echo "📍 Domain ${service.domain} resolves to: $DOMAIN_IP"
+              if [ "$DOMAIN_IP" != "$SERVER_IP" ] && [ "$SERVER_IP" != "unknown" ]; then
+                echo "⚠️  Warning: ${service.domain} may not point to this server"
               fi
+            '') config.services)}
+            
+            read -p "Continue with certificate requests? (y/N): " -n 1 -r
+            echo
+            if [[ ! $REPLY =~ ^[Yy]$ ]]; then
+              sudo pkill -f "nginx: master process"
+              exit 1
             fi
             
-            echo "📜 Requesting certificate from Let's Encrypt..."
-            sudo ${pkgs.certbot}/bin/certbot certonly \
-              --webroot \
-              --webroot-path /var/www/html \
-              --email ${config.email} \
-              --agree-tos \
-              --no-eff-email \
-              --domains ${config.domain}
+            # Request certificates for each domain
+            ${builtins.concatStringsSep "\n" (map (service: ''
+              echo "📜 Requesting certificate for ${service.domain}..."
+              sudo ${pkgs.certbot}/bin/certbot certonly \
+                --webroot \
+                --webroot-path /var/www/html \
+                --email ${service.email} \
+                --agree-tos \
+                --no-eff-email \
+                --domains ${service.domain}
+            '') config.services)}
             
             sudo pkill -f "nginx: master process"
             
-            echo "✅ SSL certificate obtained successfully!"
+            echo "✅ SSL certificates obtained successfully!"
             
             echo "🔧 Installing reverse proxy nginx configuration..."
             sudo cp ${nginx-config} /etc/nginx/nginx.conf
@@ -184,7 +216,7 @@
 
           # Renew certificates
           renew-cert = pkgs.writeShellScriptBin "renew-ssl-cert" ''
-            echo "🔄 Renewing SSL certificates..."
+            echo "🔄 Renewing SSL certificates for all domains..."
             if sudo ${pkgs.certbot}/bin/certbot renew --quiet; then
               echo "✅ Certificate renewal successful"
               echo "🔄 Reloading nginx..."
@@ -195,20 +227,32 @@
             fi
           '';
 
-          # Start nginx
+          # Start nginx with checks for all backend services
           start = pkgs.writeShellScriptBin "start-nginx" ''
             set -e
-            echo "🚀 Starting nginx reverse proxy for ${config.domain}"
+            echo "🚀 Starting nginx reverse proxy for ${toString (builtins.length config.services)} service(s)"
+            echo "📋 Domains: ${allDomainsStr}"
             
-            echo "🔍 Checking if service is running on ${config.proxy.host}:${toString config.proxy.port}..."
-            if ${pkgs.curl}/bin/curl -s --connect-timeout 5 http://${config.proxy.host}:${toString config.proxy.port} > /dev/null 2>&1; then
-              echo "✅ Service is responding"
-            else
-              echo "⚠️  Warning: No service detected on ${config.proxy.host}:${toString config.proxy.port}"
-            fi
+            echo "🔍 Checking backend services..."
+            ${builtins.concatStringsSep "\n" (map (service: ''
+              echo "  Checking ${service.domain} -> ${service.proxy.host}:${toString service.proxy.port}..."
+              if ${pkgs.curl}/bin/curl -s --connect-timeout 5 http://${service.proxy.host}:${toString service.proxy.port} > /dev/null 2>&1; then
+                echo "    ✅ Service is responding"
+              else
+                echo "    ⚠️  Warning: No service detected on ${service.proxy.host}:${toString service.proxy.port}"
+              fi
+            '') config.services)}
             
-            if [ ! -f "/etc/letsencrypt/live/${config.domain}/fullchain.pem" ]; then
-              echo "❌ SSL certificates not found for ${config.domain}"
+            # Check if all certificates exist
+            MISSING_CERTS=""
+            ${builtins.concatStringsSep "\n" (map (service: ''
+              if ! sudo test -f "/etc/letsencrypt/live/${service.domain}/fullchain.pem"; then
+                MISSING_CERTS="$MISSING_CERTS ${service.domain}"
+              fi
+            '') config.services)}
+            
+            if [ -n "$MISSING_CERTS" ]; then
+              echo "❌ SSL certificates not found for:$MISSING_CERTS"
               echo "📋 Run 'nix run .#get-cert' first"
               exit 1
             fi
@@ -228,7 +272,8 @@
             
             if pgrep -f "nginx: master process" > /dev/null; then
               echo "✅ Nginx reverse proxy started successfully!"
-              echo "🌐 Your domain: https://${config.domain}"
+              echo "🌐 Your domains:"
+              ${builtins.concatStringsSep "\n" (map (service: ''echo "   https://${service.domain}"'') config.services)}
             else
               echo "❌ Nginx failed to start! Check logs: nix run .#logs -- error"
               exit 1
@@ -252,10 +297,13 @@
             fi
           '';
 
-          # Nginx status
+          # Enhanced status check for all services
           status = pkgs.writeShellScriptBin "nginx-status" ''
-            echo "📊 Nginx Reverse Proxy Status for ${config.domain}"
-            echo "=================================="
+            echo "📊 Nginx Reverse Proxy Status"
+            echo "=============================="
+            echo "Services: ${toString (builtins.length config.services)}"
+            echo "Domains: ${allDomainsStr}"
+            echo ""
             
             if pgrep -f "nginx: master process" > /dev/null; then
               echo "✅ Nginx is running"
@@ -265,12 +313,26 @@
             fi
             
             echo ""
-            echo "🎯 Backend service check (${config.proxy.host}:${toString config.proxy.port}):"
-            if ${pkgs.curl}/bin/curl -s --connect-timeout 2 http://${config.proxy.host}:${toString config.proxy.port} > /dev/null 2>&1; then
-              echo "   ✅ Service is responding"
-            else
-              echo "   ❌ No service responding"
-            fi
+            echo "🎯 Backend service checks:"
+            ${builtins.concatStringsSep "\n" (map (service: ''
+              echo "  ${service.domain} -> ${service.proxy.host}:${toString service.proxy.port}:"
+              if ${pkgs.curl}/bin/curl -s --connect-timeout 2 http://${service.proxy.host}:${toString service.proxy.port} > /dev/null 2>&1; then
+                echo "    ✅ Service is responding"
+              else
+                echo "    ❌ No service responding"
+              fi
+            '') config.services)}
+            
+            echo ""
+            echo "🔒 SSL Certificate status:"
+            ${builtins.concatStringsSep "\n" (map (service: ''
+              if [ -f "/etc/letsencrypt/live/${service.domain}/fullchain.pem" ]; then
+                EXPIRY=$(sudo openssl x509 -enddate -noout -in /etc/letsencrypt/live/${service.domain}/fullchain.pem | cut -d= -f2)
+                echo "  ${service.domain}: ✅ Valid (expires: $EXPIRY)"
+              else
+                echo "  ${service.domain}: ❌ Certificate not found"
+              fi
+            '') config.services)}
           '';
 
           # View logs
