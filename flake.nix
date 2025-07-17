@@ -352,14 +352,17 @@
         };
 
         # Apps for easy access
-        apps = flake-utils.lib.mkApp { drv = self.packages.${system}.setup; } //
-               flake-utils.lib.mkApp { drv = self.packages.${system}.get-cert; } //
-               flake-utils.lib.mkApp { drv = self.packages.${system}.renew-cert; } //
-               flake-utils.lib.mkApp { drv = self.packages.${system}.start; } //
-               flake-utils.lib.mkApp { drv = self.packages.${system}.stop; } //
-               flake-utils.lib.mkApp { drv = self.packages.${system}.status; } //
-               flake-utils.lib.mkApp { drv = self.packages.${system}.logs; } //
-               flake-utils.lib.mkApp { drv = self.packages.${system}.regenerate-config; };
+        apps = {
+          default = flake-utils.lib.mkApp { drv = self.packages.${system}.status; };
+          setup = flake-utils.lib.mkApp { drv = self.packages.${system}.setup; };
+          get-cert = flake-utils.lib.mkApp { drv = self.packages.${system}.get-cert; };
+          renew-cert = flake-utils.lib.mkApp { drv = self.packages.${system}.renew-cert; };
+          start = flake-utils.lib.mkApp { drv = self.packages.${system}.start; };
+          stop = flake-utils.lib.mkApp { drv = self.packages.${system}.stop; };
+          status = flake-utils.lib.mkApp { drv = self.packages.${system}.status; };
+          logs = flake-utils.lib.mkApp { drv = self.packages.${system}.logs; };
+          regenerate-config = flake-utils.lib.mkApp { drv = self.packages.${system}.regenerate-config; };
+        };
       }
     );
 }
