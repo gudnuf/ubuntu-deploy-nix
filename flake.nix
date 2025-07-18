@@ -163,50 +163,108 @@
           get-cert = pkgs.writeShellScriptBin "get-ssl-cert" ''
             set -e
             echo "🔒 Obtaining SSL certificates for ${toString (builtins.length config.services)} domain(s)"
-            echo "📋 Domains: ${allDomainsStr}"
             
-            echo "🚀 Starting nginx for ACME challenge..."
-            sudo cp ${acme-nginx-config} /etc/nginx/nginx.conf
-            sudo pkill -f "nginx: master process" 2>/dev/null || true
-            sleep 2
-            sudo ${pkgs.nginx}/bin/nginx -c /etc/nginx/nginx.conf
-            sleep 3
+            # Filter regular and wildcard services
+            REGULAR_DOMAINS="${builtins.concatStringsSep " " (map (service: service.domain) (builtins.filter (service: !(service.isWildcard or false)) config.services))}"
+            HAS_WILDCARD=${if (builtins.length (builtins.filter (service: service.isWildcard or false) config.services)) > 0 then "true" else "false"}
             
-            echo "🔍 Checking domain resolution..."
-            SERVER_IP=$(${pkgs.curl}/bin/curl -s http://ipv4.icanhazip.com/ || echo "unknown")
-            echo "📍 This server's IP: $SERVER_IP"
-            
-            # Check each domain
-            ${builtins.concatStringsSep "\n" (map (service: ''
-              DOMAIN_IP=$(${pkgs.dig}/bin/dig +short ${service.domain})
-              echo "📍 Domain ${service.domain} resolves to: $DOMAIN_IP"
-              if [ "$DOMAIN_IP" != "$SERVER_IP" ] && [ "$SERVER_IP" != "unknown" ]; then
-                echo "⚠️  Warning: ${service.domain} may not point to this server"
-              fi
-            '') config.services)}
-            
-            read -p "Continue with certificate requests? (y/N): " -n 1 -r
-            echo
-            if [[ ! $REPLY =~ ^[Yy]$ ]]; then
-              sudo pkill -f "nginx: master process"
-              exit 1
+            if [ -n "$REGULAR_DOMAINS" ]; then
+              echo "📋 Regular domains: $REGULAR_DOMAINS"
+            fi
+            if [ "$HAS_WILDCARD" = "true" ]; then
+              echo "🌟 Wildcard domain: *.sando.blue"
             fi
             
-            # Request certificates for each domain
-            ${builtins.concatStringsSep "\n" (map (service: ''
-              echo "📜 Requesting certificate for ${service.domain}..."
-              sudo ${pkgs.certbot}/bin/certbot certonly \
-                --webroot \
-                --webroot-path /var/www/html \
-                --email ${service.email} \
-                --agree-tos \
-                --no-eff-email \
-                --domains ${service.domain}
-            '') config.services)}
+            if [ -n "$REGULAR_DOMAINS" ]; then
+              echo "🚀 Starting nginx for ACME challenge (regular domains)..."
+              sudo cp ${acme-nginx-config} /etc/nginx/nginx.conf
+              sudo pkill -f "nginx: master process" 2>/dev/null || true
+              sleep 2
+              sudo ${pkgs.nginx}/bin/nginx -c /etc/nginx/nginx.conf
+              sleep 3
+              
+              echo "🔍 Checking domain resolution..."
+              SERVER_IP=$(${pkgs.curl}/bin/curl -s http://ipv4.icanhazip.com/ || echo "unknown")
+              echo "📍 This server's IP: $SERVER_IP"
+              
+              # Check each regular domain
+              ${builtins.concatStringsSep "\n" (map (service: ''
+                if [ "${service.domain}" != "*.sando.blue" ]; then
+                  DOMAIN_IP=$(${pkgs.dig}/bin/dig +short ${service.domain})
+                  echo "📍 Domain ${service.domain} resolves to: $DOMAIN_IP"
+                  if [ "$DOMAIN_IP" != "$SERVER_IP" ] && [ "$SERVER_IP" != "unknown" ]; then
+                    echo "⚠️  Warning: ${service.domain} may not point to this server"
+                  fi
+                fi
+              '') config.services)}
+              
+              read -p "Continue with regular domain certificate requests? (y/N): " -n 1 -r
+              echo
+              if [[ ! $REPLY =~ ^[Yy]$ ]]; then
+                sudo pkill -f "nginx: master process"
+                exit 1
+              fi
+              
+              # Request certificates for each regular domain
+              ${builtins.concatStringsSep "\n" (map (service: ''
+                if [ "${service.domain}" != "*.sando.blue" ]; then
+                  echo "📜 Requesting certificate for ${service.domain}..."
+                  sudo ${pkgs.certbot}/bin/certbot certonly \
+                    --webroot \
+                    --webroot-path /var/www/html \
+                    --email ${service.email} \
+                    --agree-tos \
+                    --no-eff-email \
+                    --domains ${service.domain}
+                fi
+              '') config.services)}
+              
+              sudo pkill -f "nginx: master process"
+            fi
             
-            sudo pkill -f "nginx: master process"
+            # Handle wildcard certificate separately
+            if [ "$HAS_WILDCARD" = "true" ]; then
+              echo ""
+              echo "🌟 Wildcard Certificate Setup Required"
+              echo "======================================"
+              echo "Wildcard certificates (*.sando.blue) require DNS-01 challenge."
+              echo "This requires DNS provider integration."
+              echo ""
+              echo "🔧 Setup Options:"
+              echo ""
+              echo "1. Manual DNS Challenge (Recommended for testing):"
+              echo "   sudo certbot certonly --manual --preferred-challenges dns \\"
+              echo "     --email johntoshi21@proton.me --agree-tos --no-eff-email \\"
+              echo "     -d sando.blue -d *.sando.blue"
+              echo ""
+              echo "2. Automated DNS Challenge (Production):"
+              echo "   Install DNS provider plugin, e.g.:"
+              echo "   • Cloudflare: pip install certbot-dns-cloudflare"
+              echo "   • DigitalOcean: pip install certbot-dns-digitalocean"
+              echo "   • etc."
+              echo ""
+              echo "📋 Manual DNS Challenge Instructions:"
+              echo "1. Run the manual command above"
+              echo "2. When prompted, add the TXT record to your DNS"
+              echo "3. Wait for DNS propagation (check with: dig TXT _acme-challenge.sando.blue)"
+              echo "4. Press Enter to continue verification"
+              echo ""
+              
+              read -p "Run manual wildcard certificate generation now? (y/N): " -n 1 -r
+              echo
+              if [[ $REPLY =~ ^[Yy]$ ]]; then
+                echo "🚀 Starting manual wildcard certificate generation..."
+                sudo ${pkgs.certbot}/bin/certbot certonly --manual --preferred-challenges dns \
+                  --email johntoshi21@proton.me --agree-tos --no-eff-email \
+                  -d sando.blue -d *.sando.blue
+              else
+                echo "⏸️  Skipping wildcard certificate generation."
+                echo "   You can run it manually later with the command above."
+              fi
+            fi
             
-            echo "✅ SSL certificates obtained successfully!"
+            echo ""
+            echo "✅ Certificate generation process complete!"
             
             echo "🔧 Installing reverse proxy nginx configuration..."
             sudo cp ${nginx-config} /etc/nginx/nginx.conf
@@ -231,23 +289,49 @@
           start = pkgs.writeShellScriptBin "start-nginx" ''
             set -e
             echo "🚀 Starting nginx reverse proxy for ${toString (builtins.length config.services)} service(s)"
-            echo "📋 Domains: ${allDomainsStr}"
+            
+            # Filter regular and wildcard services  
+            REGULAR_DOMAINS="${builtins.concatStringsSep " " (map (service: service.domain) (builtins.filter (service: !(service.isWildcard or false)) config.services))}"
+            HAS_WILDCARD=${if (builtins.length (builtins.filter (service: service.isWildcard or false) config.services)) > 0 then "true" else "false"}
+            
+            if [ -n "$REGULAR_DOMAINS" ]; then
+              echo "📋 Regular domains: $REGULAR_DOMAINS"
+            fi
+            if [ "$HAS_WILDCARD" = "true" ]; then
+              echo "🌟 Wildcard domain: *.sando.blue"
+            fi
             
             echo "🔍 Checking backend services..."
             ${builtins.concatStringsSep "\n" (map (service: ''
-              echo "  Checking ${service.domain} -> ${service.proxy.host}:${toString service.proxy.port}..."
-              if ${pkgs.curl}/bin/curl -s --connect-timeout 5 http://${service.proxy.host}:${toString service.proxy.port} > /dev/null 2>&1; then
-                echo "    ✅ Service is responding"
+              if [ "${service.domain}" != "*.sando.blue" ]; then
+                echo "  Checking ${service.domain} -> ${service.proxy.host}:${toString service.proxy.port}..."
+                if ${pkgs.curl}/bin/curl -s --connect-timeout 5 http://${service.proxy.host}:${toString service.proxy.port} > /dev/null 2>&1; then
+                  echo "    ✅ Service is responding"
+                else
+                  echo "    ⚠️  Warning: No service detected on ${service.proxy.host}:${toString service.proxy.port}"
+                fi
               else
-                echo "    ⚠️  Warning: No service detected on ${service.proxy.host}:${toString service.proxy.port}"
+                echo "  Checking wildcard backend -> ${service.proxy.host}:${toString service.proxy.port}..."
+                if ${pkgs.curl}/bin/curl -s --connect-timeout 5 http://${service.proxy.host}:${toString service.proxy.port} > /dev/null 2>&1; then
+                  echo "    ✅ Wildcard backend service is responding"
+                else
+                  echo "    ⚠️  Warning: No wildcard backend service detected on ${service.proxy.host}:${toString service.proxy.port}"
+                fi
               fi
             '') config.services)}
             
             # Check if all certificates exist
             MISSING_CERTS=""
             ${builtins.concatStringsSep "\n" (map (service: ''
-              if ! sudo test -f "/etc/letsencrypt/live/${service.domain}/fullchain.pem"; then
-                MISSING_CERTS="$MISSING_CERTS ${service.domain}"
+              if [ "${service.domain}" != "*.sando.blue" ]; then
+                if ! sudo test -f "/etc/letsencrypt/live/${service.domain}/fullchain.pem"; then
+                  MISSING_CERTS="$MISSING_CERTS ${service.domain}"
+                fi
+              else
+                # Wildcard certificate is stored under the base domain
+                if ! sudo test -f "/etc/letsencrypt/live/sando.blue/fullchain.pem"; then
+                  MISSING_CERTS="$MISSING_CERTS *.sando.blue"
+                fi
               fi
             '') config.services)}
             
@@ -273,7 +357,13 @@
             if pgrep -f "nginx: master process" > /dev/null; then
               echo "✅ Nginx reverse proxy started successfully!"
               echo "🌐 Your domains:"
-              ${builtins.concatStringsSep "\n" (map (service: ''echo "   https://${service.domain}"'') config.services)}
+              ${builtins.concatStringsSep "\n" (map (service: ''
+                if [ "${service.domain}" != "*.sando.blue" ]; then
+                  echo "   https://${service.domain}"
+                else
+                  echo "   https://*.sando.blue (wildcard subdomains)"
+                fi
+              '') config.services)}
             else
               echo "❌ Nginx failed to start! Check logs: nix run .#logs -- error"
               exit 1
@@ -301,8 +391,18 @@
           status = pkgs.writeShellScriptBin "nginx-status" ''
             echo "📊 Nginx Reverse Proxy Status"
             echo "=============================="
+            
+            # Filter regular and wildcard services
+            REGULAR_DOMAINS="${builtins.concatStringsSep " " (map (service: service.domain) (builtins.filter (service: !(service.isWildcard or false)) config.services))}"
+            HAS_WILDCARD=${if (builtins.length (builtins.filter (service: service.isWildcard or false) config.services)) > 0 then "true" else "false"}
+            
             echo "Services: ${toString (builtins.length config.services)}"
-            echo "Domains: ${allDomainsStr}"
+            if [ -n "$REGULAR_DOMAINS" ]; then
+              echo "Regular domains: $REGULAR_DOMAINS"
+            fi
+            if [ "$HAS_WILDCARD" = "true" ]; then
+              echo "Wildcard domain: *.sando.blue"
+            fi
             echo ""
             
             if pgrep -f "nginx: master process" > /dev/null; then
@@ -315,24 +415,55 @@
             echo ""
             echo "🎯 Backend service checks:"
             ${builtins.concatStringsSep "\n" (map (service: ''
-              echo "  ${service.domain} -> ${service.proxy.host}:${toString service.proxy.port}:"
-              if ${pkgs.curl}/bin/curl -s --connect-timeout 2 http://${service.proxy.host}:${toString service.proxy.port} > /dev/null 2>&1; then
-                echo "    ✅ Service is responding"
+              if [ "${service.domain}" != "*.sando.blue" ]; then
+                echo "  ${service.domain} -> ${service.proxy.host}:${toString service.proxy.port}:"
+                if ${pkgs.curl}/bin/curl -s --connect-timeout 2 http://${service.proxy.host}:${toString service.proxy.port} > /dev/null 2>&1; then
+                  echo "    ✅ Service is responding"
+                else
+                  echo "    ❌ No service responding"
+                fi
               else
-                echo "    ❌ No service responding"
+                echo "  *.sando.blue -> ${service.proxy.host}:${toString service.proxy.port}:"
+                if ${pkgs.curl}/bin/curl -s --connect-timeout 2 http://${service.proxy.host}:${toString service.proxy.port} > /dev/null 2>&1; then
+                  echo "    ✅ Wildcard backend service is responding"
+                  echo "    📋 This handles subdomain routing for holesail connections"
+                else
+                  echo "    ❌ No wildcard backend service responding"
+                fi
               fi
             '') config.services)}
             
             echo ""
             echo "🔒 SSL Certificate status:"
             ${builtins.concatStringsSep "\n" (map (service: ''
-              if [ -f "/etc/letsencrypt/live/${service.domain}/fullchain.pem" ]; then
-                EXPIRY=$(sudo openssl x509 -enddate -noout -in /etc/letsencrypt/live/${service.domain}/fullchain.pem | cut -d= -f2)
-                echo "  ${service.domain}: ✅ Valid (expires: $EXPIRY)"
+              if [ "${service.domain}" != "*.sando.blue" ]; then
+                if [ -f "/etc/letsencrypt/live/${service.domain}/fullchain.pem" ]; then
+                  EXPIRY=$(sudo openssl x509 -enddate -noout -in /etc/letsencrypt/live/${service.domain}/fullchain.pem | cut -d= -f2)
+                  echo "  ${service.domain}: ✅ Valid (expires: $EXPIRY)"
+                else
+                  echo "  ${service.domain}: ❌ Certificate not found"
+                fi
               else
-                echo "  ${service.domain}: ❌ Certificate not found"
+                # Wildcard certificate is stored under the base domain
+                if [ -f "/etc/letsencrypt/live/sando.blue/fullchain.pem" ]; then
+                  EXPIRY=$(sudo openssl x509 -enddate -noout -in /etc/letsencrypt/live/sando.blue/fullchain.pem | cut -d= -f2)
+                  echo "  *.sando.blue: ✅ Wildcard certificate valid (expires: $EXPIRY)"
+                  echo "    📋 Covers all subdomains like: connection.sando.blue"
+                else
+                  echo "  *.sando.blue: ❌ Wildcard certificate not found"
+                  echo "    📋 Run manual DNS challenge: nix run .#get-cert"
+                fi
               fi
             '') config.services)}
+            
+            if [ "$HAS_WILDCARD" = "true" ]; then
+              echo ""
+              echo "🌟 Wildcard Subdomain Testing:"
+              echo "   You can test with subdomains like:"
+              echo "   • https://test.sando.blue"
+              echo "   • https://b1cb881b32e59f943a653057409883343aba75c0cef6753e5104e7b6b834.sando.blue"
+              echo "   (These will be proxied to your Rust application)"
+            fi
           '';
 
           # View logs
